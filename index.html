@@ -1,0 +1,192 @@
+import React, { useState } from 'react';
+import { 
+  PlusCircle, 
+  FileText, 
+  Wand2, 
+  ClipboardPaste, 
+  Settings, 
+  Upload, 
+  Eye, 
+  Send, 
+  CheckCircle2, 
+  Loader2, 
+  AlertCircle,
+  ExternalLink,
+  ChevronDown,
+  ChevronUp,
+  Image as ImageIcon,
+  Trash2,
+  Copy
+} from 'lucide-react';
+
+const GEMINI_API_KEY = ""; // Diisi otomatis oleh environment
+const MODEL_NAME = "gemini-3-flash-preview"; 
+
+// Skema JSON untuk output AI agar konsisten
+const QUESTION_SCHEMA = {
+  type: "ARRAY",
+  items: {
+    type: "OBJECT",
+    properties: {
+      question: { type: "STRING" },
+      options: { type: "ARRAY", items: { type: "STRING" }, minItems: 4, maxItems: 5 },
+      correctIndex: { type: "NUMBER" },
+      imagePrompt: { type: "STRING", description: "Prompt deskriptif untuk generate gambar pendukung soal jika relevan" },
+      passage: { type: "STRING", description: "Wacana atau teks panjang sebelum pertanyaan jika ada" }
+    },
+    required: ["question", "options", "correctIndex"]
+  }
+};
+
+const App = () => {
+  const [activeTab, setActiveTab] = useState('ai');
+  const [loading, setLoading] = useState(false);
+  const [questions, setQuestions] = useState([]);
+  const [serverLinks, setServerLinks] = useState(null);
+  
+  // State Form Konfigurasi
+  const [config, setConfig] = useState({
+    title: "Ujian Harian Baru",
+    description: "Silakan kerjakan soal berikut dengan jujur.",
+    points: 10,
+    classes: "X-A, X-B, X-C",
+    token: "",
+    addIdentity: true,
+    shuffle: false,
+    collectEmail: false,
+    limitOne: true,
+    createSheet: true,
+    disableAutosave: false
+  });
+
+  // State Input AI
+  const [aiInputs, setAiInputs] = useState({
+    level: "SMA",
+    grade: "10",
+    subject: "Bahasa Indonesia",
+    count: 5,
+    imageCount: 2,
+    topic: ""
+  });
+
+  // State Input Manual/Paste
+  const [rawText, setRawText] = useState("");
+  const [showConfig, setShowConfig] = useState(true);
+
+  const handleConfigChange = (e) => {
+    const { name, value, type, checked } = e.target;
+    setConfig(prev => ({
+      ...prev,
+      [name]: type === 'checkbox' ? checked : value
+    }));
+  };
+
+  const handleAIInputChange = (e) => {
+    const { name, value } = e.target;
+    setAiInputs(prev => ({ ...prev, [name]: value }));
+  };
+
+  const callGemini = async (prompt, systemInstruction) => {
+    setLoading(true);
+    try {
+      const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL_NAME}:generateContent?key=${GEMINI_API_KEY}`;
+      const payload = {
+        contents: [{ parts: [{ text: prompt }] }],
+        systemInstruction: { parts: [{ text: systemInstruction }] },
+        generationConfig: {
+          responseMimeType: "application/json",
+          responseSchema: QUESTION_SCHEMA
+        }
+      };
+
+      const response = await fetch(apiUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      const data = await response.json();
+      
+      // Safety check for API response structure
+      if (!data.candidates || !data.candidates[0]) {
+        throw new Error("Respon AI tidak valid");
+      }
+      
+      const resultText = data.candidates[0].content.parts[0].text;
+      const parsed = JSON.parse(resultText);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (error) {
+      console.error("Gemini Error:", error);
+      return [];
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const generateWithAI = async () => {
+    const systemPrompt = `Anda adalah pakar pembuat soal ujian profesional. Buatlah soal yang berkualitas tinggi sesuai jenjang. 
+    Berikan kunci jawaban dalam bentuk index (0-4). Jika soal butuh gambar, berikan imagePrompt yang sangat detail.`;
+    
+    const userPrompt = `Buatkan ${aiInputs.count} soal pilihan ganda untuk jenjang ${aiInputs.level} kelas ${aiInputs.grade} mata pelajaran ${aiInputs.subject}. 
+    Materi Pokok: ${aiInputs.topic}. Minimal ada ${aiInputs.imageCount} soal yang memiliki instruksi generate gambar (imagePrompt).`;
+
+    const result = await callGemini(userPrompt, systemPrompt);
+    setQuestions(result);
+  };
+
+  const parseRawText = async () => {
+    if (!rawText.trim()) return;
+    const systemPrompt = `Tugas Anda adalah mengekstrak soal dari teks mentah ke format JSON terstruktur. 
+    Identifikasi pertanyaan, opsi, dan kunci jawaban (biasanya ditandai dengan bintang, tebal, atau kata 'Kunci').`;
+    
+    const result = await callGemini(`Parse teks soal berikut:\n\n${rawText}`, systemPrompt);
+    setQuestions(result);
+  };
+
+  const handleWordUpload = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    
+    setLoading(true);
+    const reader = new FileReader();
+    reader.onload = async (event) => {
+      const arrayBuffer = event.target.result;
+      
+      if (!window.mammoth) {
+        const script = document.createElement('script');
+        script.src = "https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js";
+        document.head.appendChild(script);
+        await new Promise(r => script.onload = r);
+      }
+
+      try {
+        const result = await window.mammoth.convertToHtml({ arrayBuffer: arrayBuffer });
+        const html = result.value; 
+        
+        const systemPrompt = `Anda adalah parser dokumen soal. Saya akan memberikan HTML dari dokumen Word. 
+        Ekstrak soal, opsi (A, B, C, D, E), dan kunci jawaban. Kunci jawaban seringkali ditebalkan (<strong>) atau memiliki teks 'Kunci:'. 
+        Jika ada gambar (<img> tag dengan base64), simpan URL base64 tersebut di properti 'imageData'. 
+        Pastikan output HANYA array JSON sesuai skema.`;
+        
+        const parsedQuestions = await callGemini(`Ekstrak soal dari HTML ini:\n\n${html}`, systemPrompt);
+        if (parsedQuestions && parsedQuestions.length > 0) {
+          setQuestions(parsedQuestions);
+        }
+      } catch (err) {
+        console.error(err);
+      } finally {
+        setLoading(false);
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  };
+
+  // ... rest of the existing code ...
+  return (
+    <div className="min-h-screen bg-slate-50 text-slate-900 font-sans p-4 md:p-8">
+      {/* ... existing code ... */}
+    </div>
+  );
+};
+
+export default App;
